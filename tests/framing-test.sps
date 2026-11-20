@@ -145,11 +145,20 @@
     (check (frame-error? (cadr out)))
     (check-equal? "second" (utf8->string (caddr out)))))
 
-(test "a body longer than frame-max-length between two valid frames gives body, error, body"
-  (let* ([r (parameterize ([frame-max-length 10]) (make-frame-reader))]
+(test "a length past frame-max-length is no length: body, error, the body as stray, body"
+  (let* ([skipped '()]
+         [r (parameterize ([frame-max-length 10])
+              (make-frame-reader (lambda (b) (set! skipped (cons b skipped)))))]
          [out (frame-reader-read! r (join (frame-of "first") (frame-of "this body is too long") (frame-of "second")))])
     (check-equal? '("first" frame-error "second") (texts out))
-    (check (frame-error? (cadr out)))))
+    (check (frame-error? (cadr out)))
+    (check-equal? (bytes "this body is too long") (apply join (reverse skipped)))))
+
+(test "a garbage length costs only its block: the frames after it are read"
+  (let-values ([(out skipped)
+                (read-pieces (list (bytes "Content-Length: 99999999999\r\n\r\n") (frame-of "a") (frame-of "b")))])
+    (check-equal? '(frame-error "a" "b") (texts out))
+    (check-equal? (bytevector) skipped)))
 
 (test "an overlong Content-Length line, split across pieces, leaves the length unknown: its body is stray"
   (let ([stream (join (bytes "Content-Length: ") (make-bytevector 9000 (char->integer #\0)) (bytes "4\r\n\r\nbody\n")
@@ -158,24 +167,28 @@
       (check-equal? '(frame-error "next") (texts out))
       (check-equal? (bytes "body\n") skipped))))
 
-(test "a bad body split across pieces is dropped as it arrives, and the next frame read"
-  (let* ([r (parameterize ([frame-max-length 10]) (make-frame-reader))]
+(test "the body of a length past frame-max-length, split across pieces, goes to skipped and the next frame is read"
+  (let* ([skipped '()]
+         [r (parameterize ([frame-max-length 10])
+              (make-frame-reader (lambda (b) (set! skipped (cons b skipped)))))]
          [stream (join (frame-of "this body is too long") (frame-of "next"))]
          [out (read-in-order r (pieces-of stream 4))])
-    (check-equal? '(frame-error "next") (texts out))))
+    (check-equal? '(frame-error "next") (texts out))
+    (check-equal? (bytes "this body is too long") (apply join (reverse skipped)))))
 
 (test "a Content-Length that is not a byte count, and a second Content-Length, are frame errors"
   (let-values ([(out skipped)
                 (read-pieces (list (bytes "Content-Length: many\r\n\r\n") (frame-of "a")
                                    (bytes "Content-Length: 1\r\nContent-Length: 1\r\n\r\nz")
                                    (frame-of "b")))])
-    (check-equal? '(frame-error "a" frame-error "b") (texts out))))
+    (check-equal? '(frame-error "a" frame-error "b") (texts out))
+    (check-equal? (bytes "z") skipped)))
 
-(test "a Content-Length too large for a fixnum is a frame error, and its body is dropped"
+(test "a Content-Length too large for a fixnum is a frame error, and its body is stray"
   (let-values ([(out skipped)
                 (read-pieces (list (bytes "Content-Length: 100000000000000000000000000000\r\n\r\nxyz")))])
     (check-equal? '(frame-error) (texts out))
-    (check-equal? (bytevector) skipped)))
+    (check-equal? (bytes "xyz") skipped)))
 
 (test "frame-reader-read! never changes the bytes it is given"
   (let* ([f (join (frame-of "one") (bytes "noise\n") (frame-of "two"))]
@@ -214,7 +227,7 @@
     (check-equal? "one" (utf8->string (read-frame p)))
     (check-equal? (bytes "rest") (get-bytevector-all p))))
 
-(test "read-frame raises after consuming a bad frame, and its next call reads the frame after"
+(test "read-frame raises after consuming a bad header block, and its next call reads the frame after"
   (let ([p (port-of (frame-of "first") (frame-of "too long") (frame-of "next"))])
     (parameterize ([frame-max-length 5])
       (check-equal? "first" (utf8->string (read-frame p)))

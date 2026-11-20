@@ -141,11 +141,6 @@
   (define (end-header-block! r who emit)
     (let ([n (frame-reader-length r)])
       (cond
-        [(> n (frame-reader-max-length r))
-         (emit (frame-error who "frame of ~s bytes is longer than frame-max-length, ~s"
-                 n (frame-reader-max-length r)))
-         (frame-reader-state-set! r 'discard-body)
-         (frame-reader-remaining-set! r n)]
         [(= n 0) (to-stray! r) (emit (make-bytevector 0))]
         [else
          (frame-reader-state-set! r 'body)
@@ -164,14 +159,22 @@
         [(fx= end 0) (end-header-block! r who emit)]
         [(not (frame-reader-length r))
          (let ([count (content-length line end)])
-           (if count
-               (frame-reader-length-set! r count)
-               (begin
-                 (emit (frame-error who "Content-Length ~s is not a byte count"
-                         (utf8->string (bytevector-copy-range line prefix-length end))))
-                 (discard-header! r #t))))]
+           (cond
+             [(not count)
+              (emit (frame-error who "Content-Length ~s is not a byte count"
+                      (utf8->string (bytevector-copy-range line prefix-length end))))
+              (discard-header! r #t)]
+             ;; A length the reader will not hold is no length: dropping that
+             ;; many bytes would drop every later frame when it is not honest,
+             ;; so the body is read as stray and the next header found.
+             [(> count (frame-reader-max-length r))
+              (emit (frame-error who "frame of ~s bytes is longer than frame-max-length, ~s"
+                      count (frame-reader-max-length r)))
+              (discard-header! r #t)]
+             [else (frame-reader-length-set! r count)]))]
         [(starts-with-content-length? line end)
          (emit (frame-error who "more than one Content-Length header"))
+         (frame-reader-length-set! r #f)
          (discard-header! r #t)])))
 
   (define (bytevector-copy-range bytes start end)
