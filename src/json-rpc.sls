@@ -1,13 +1,17 @@
 (library (json-rpc)
   (export
+    ;; Messages
     make-json-rpc-request json-rpc-request? json-rpc-request-id json-rpc-request-method
     json-rpc-request-params
     make-json-rpc-notification json-rpc-notification? json-rpc-notification-method
     json-rpc-notification-params
     make-json-rpc-response make-json-rpc-error-response json-rpc-response?
     json-rpc-response-id json-rpc-response-result json-rpc-response-error
+    ;; Reading and writing
     json->json-rpc-message bytevector->json-rpc-message json-rpc-message->bytevector
+    ;; Errors
     &json-rpc-error make-json-rpc-error json-rpc-error? json-rpc-error-code json-rpc-error-data
+    ;; Codes
     json-rpc-parse-error-code json-rpc-invalid-request-code json-rpc-method-not-found-code
     json-rpc-invalid-params-code json-rpc-internal-error-code)
   (import (chezscheme) (json))

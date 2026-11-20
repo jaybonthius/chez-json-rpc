@@ -96,6 +96,39 @@
     (check-equal? line (apply join (reverse calls)))
     (check-equal? '("ok") (texts (frame-reader-read! r (frame-of "ok"))))))
 
+(test "stray text without a line end, then two frames: both are read"
+  (let-values ([(out skipped) (read-pieces (list (join (bytes "hello") (frame-of "x") (frame-of "y"))))])
+    (check-equal? '("x" "y") (texts out))
+    (check-equal? (bytes "hello") skipped))
+  (let-values ([(out skipped)
+                (read-pieces (list (join (bytes "Loading...") (frame-of "a") (frame-of "b"))
+                                   (bytes "\n") (frame-of "c")))])
+    (check-equal? '("a" "b" "c") (texts out))
+    (check-equal? (bytes "Loading...\n") skipped)))
+
+(test "a body one byte short: the slack byte goes to skipped and the later frames are read"
+  (let ([body (bytes "{\"a\":\"\xe9;xx\"}")])
+    (check-equal? 12 (bytevector-length body))
+    (let-values ([(out skipped)
+                  (read-pieces (list (join (bytes "Content-Length: 11\r\n\r\n") body
+                                           (frame-of "1") (frame-of "2") (frame-of "3"))))])
+      (check-equal? '("{\"a\":\"\xe9;xx\"" "1" "2" "3") (texts out))
+      (check-equal? (bytes "}") skipped))))
+
+(test "a body one byte long: it takes the next frame's first byte, and the frames after are read"
+  (let-values ([(out skipped)
+                (read-pieces (list (join (bytes "Content-Length: 4\r\n\r\nabc")
+                                         (frame-of "lost") (frame-of "2") (frame-of "3"))))])
+    (check-equal? '("abcC" "2" "3") (texts out))
+    (check-equal? (bytes "ontent-Length: 4\r\n\r\nlost") skipped)))
+
+(test "a log line that mentions Content-Length: mid-line costs the frames it overlaps, then the reader realigns"
+  (let-values ([(out skipped)
+                (read-pieces (list (join (bytes "debug: sent Content-Length: 5 bytes\n")
+                                         (frame-of "one") (frame-of "two") (frame-of "three"))))])
+    (check-equal? '(frame-error "two" "three") (texts out))
+    (check-equal? (bytes "debug: sent one") skipped)))
+
 (test "stray output that starts like a header but is not one goes to skipped"
   (let-values ([(out skipped)
                 (read-pieces (list (bytes "Content-Lengthy\r\nContent: x\r\n") (frame-of "a")))])
@@ -182,8 +215,7 @@
     (check-equal? (bytes "rest") (get-bytevector-all p))))
 
 (test "read-frame raises after consuming a bad frame, and its next call reads the frame after"
-  (let ([p (parameterize ([frame-max-length 5])
-             (port-of (frame-of "first") (frame-of "too long") (frame-of "next")))])
+  (let ([p (port-of (frame-of "first") (frame-of "too long") (frame-of "next"))])
     (parameterize ([frame-max-length 5])
       (check-equal? "first" (utf8->string (read-frame p)))
       (check-raises frame-error? (read-frame p))

@@ -1,6 +1,11 @@
 (library (json-rpc framing)
-  (export make-frame-reader frame-reader? frame-reader-read! read-frame body->frame
-          frame-max-length &frame-error frame-error?)
+  (export
+    ;; Reading
+    make-frame-reader frame-reader? frame-reader-read! read-frame
+    ;; Writing
+    body->frame
+    ;; Limits and errors
+    frame-max-length &frame-error frame-error?)
   (import (chezscheme))
 
   (define frame-max-length
@@ -30,9 +35,9 @@
   (define lf 10)
   (define cr 13)
 
-  ;; Only a line's start can begin a header, so in the stray state match is -1
-  ;; in the middle of a line, and otherwise counts the bytes held in line that
-  ;; may yet be "Content-Length:".
+  ;; A header is recognised wherever it starts, not only at a line's start,
+  ;; so stray output without a line end, or a body whose length was miscounted,
+  ;; costs the frames it overlaps and not every frame after it.
   (define-record-type (frame-reader new-frame-reader frame-reader?)
     (sealed #t)
     (fields
@@ -84,6 +89,13 @@
         (frame-reader-stray-set! r #f)
         (frame-reader-stray-count-set! r 0)
         ((frame-reader-skipped r) ((cdr stray))))))
+
+  (define (find-prefix-start bytes start end)
+    (let loop ([i start])
+      (cond
+        [(fx= i end) #f]
+        [(fx= (ascii-downcase (bytevector-u8-ref bytes i)) (bytevector-u8-ref content-length-prefix 0)) i]
+        [else (loop (fx+ i 1))])))
 
   (define (find-lf bytes start end)
     (let loop ([i start])
@@ -175,14 +187,13 @@
         (case (frame-reader-state r)
           [(stray)
            (let ([m (frame-reader-match r)])
-             (if (fx< m 0)
-                 (let ([lf-at (find-lf bytes i end)])
-                   (if lf-at
-                       (begin
-                         (stray-put! r bytes i (fx+ lf-at 1))
-                         (frame-reader-match-set! r 0)
-                         (loop (fx+ lf-at 1)))
-                       (stray-put! r bytes i end)))
+             (if (fx= m 0)
+                 (let ([c-at (find-prefix-start bytes i end)])
+                   (stray-put! r bytes i (or c-at end))
+                   (when c-at
+                     (bytevector-u8-set! (frame-reader-line r) 0 (bytevector-u8-ref bytes c-at))
+                     (frame-reader-match-set! r 1)
+                     (loop (fx+ c-at 1))))
                  (let ([b (bytevector-u8-ref bytes i)])
                    (cond
                      [(fx= (ascii-downcase b) (bytevector-u8-ref content-length-prefix m))
@@ -192,12 +203,14 @@
                             (flush-stray! r)
                             (frame-reader-state-set! r 'header)
                             (frame-reader-line-length-set! r prefix-length)
-                            (frame-reader-match-set! r -1))
+                            (frame-reader-match-set! r 0))
                           (frame-reader-match-set! r (fx+ m 1)))
                       (loop (fx+ i 1))]
                      [else
+                      ;; No letter of the prefix after its first starts it
+                      ;; again, so the failing byte is the only one that can.
                       (stray-put! r (frame-reader-line r) 0 m)
-                      (frame-reader-match-set! r -1)
+                      (frame-reader-match-set! r 0)
                       (loop i)]))))]
           [(header)
            (let* ([lf-at (find-lf bytes i end)]
@@ -279,7 +292,7 @@
          (define (end-of-input)
            (if (and (eq? (frame-reader-state r) 'stray) (not failure))
                (begin
-                 (stray-put! r (frame-reader-line r) 0 (fxmax 0 (frame-reader-match r)))
+                 (stray-put! r (frame-reader-line r) 0 (frame-reader-match r))
                  (flush-stray! r)
                  (eof-object))
                (begin
